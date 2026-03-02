@@ -42,6 +42,7 @@ class GradientBoostingModel:
         max_features: Optional[int] = None,
         random_state: int = 42,
         use_scaler: bool = False,
+        multi_class: bool = False,
     ):
         """
         Initialize Gradient Boosting model with customizable parameters
@@ -77,6 +78,7 @@ class GradientBoostingModel:
         self.task = task
         self.use_scaler = use_scaler
         self.scaler = StandardScaler() if use_scaler else None
+        self.multi_class = multi_class
 
     def train_test_split(
         self,
@@ -98,7 +100,11 @@ class GradientBoostingModel:
             X_train, X_test, y_train, y_test: Split datasets
         """
         # TODO: Implement train/test split and track feature names
-        pass
+        
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
+        self.feature_names = list(X.columns)
+        return X_train, X_test, y_train, y_test
 
     def fit(self, X_train: pd.DataFrame, y_train: pd.Series, verbose: bool = True):
         """
@@ -113,7 +119,17 @@ class GradientBoostingModel:
             self: Trained model instance
         """
         # TODO: Create classifier/regressor based on task and fit it
-        pass
+        if self.task == "classification":
+            self.model = GradientBoostingClassifier(**self.params, verbose=verbose)
+        elif self.task == "regression":
+            self.model = GradientBoostingRegressor(**self.params, verbose=verbose)
+        
+        if self.use_scaler:
+            self.scaler = self.scaler.fit(X_train)
+            X_train = self.scaler.transform(X_train)
+        
+        self.model.fit(X_train, y_train)
+
 
     def predict(
         self, X: pd.DataFrame, return_proba: bool = False
@@ -129,7 +145,20 @@ class GradientBoostingModel:
             Predictions or probability estimates
         """
         # TODO: Apply scaler when enabled, then predict
-        pass
+        if not self.model:
+            raise ValueError("Model is not trained")
+        
+        if self.use_scaler:
+            X = self.scaler.transform(X)
+
+        if return_proba:
+            if self.multi_class:
+                return self.model.predict_proba(X)
+            return self.model.predict_proba(X)[:, 1]
+        else: 
+            return self.model.predict(X)
+
+
 
     def evaluate(self, X_test: pd.DataFrame, y_test: pd.Series) -> Dict:
         """
@@ -144,16 +173,35 @@ class GradientBoostingModel:
         """
 
         # TODO: Compute metrics (classification vs regression)
+        
+        y_pred = self.predict(X_test)
+        y_proba = self.predict(X_test, return_proba=True)
+
         if self.task == "classification":
+            accuracy = accuracy_score(y_test, y_pred)
+            precision = precision_score(y_test, y_pred, zero_division=0, average = "weighted")
+            recall = recall_score(y_test, y_pred, zero_division=0, average = "weighted")
+            f1 = f1_score(y_test, y_pred, zero_division=0, average = "weighted")
+            if self.multi_class:
+                auc = roc_auc_score(y_test, y_proba, multi_class="ovr", average="weighted")
+            elif len(np.unique(y_test)) == 2:
+                auc = roc_auc_score(y_test, y_proba)
+            else:
+                auc = np.nan
+
             metrics = {
-                "accuracy": None,
-                "precision": None,
-                "recall": None,
-                "f1": None,
-                "roc_auc": None,
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "roc_auc": auc,
             }
         else:
-            metrics = {"rmse": None, "mae": None, "r2": None}
+            mse = mean_squared_error(y_test, y_pred)
+            rmse = np.sqrt(mse)
+            r2 = r2_score(y_test, y_pred)
+            mae = mean_absolute_error(y_test, y_pred)
+            metrics = {"rmse": rmse, "mae": mae, "r2": r2}
 
         return metrics
 
@@ -175,17 +223,30 @@ class GradientBoostingModel:
             Dictionary of cross-validation results using sklearn cross_val_score
         """
         # TODO: Use Pipeline when scaling, and choose classifier/regressor based on task
-        model = None
+        if self.task == "classification":
+            model = self.model 
+        elif self.task == "regression":
+            model = self.model
+        
+        pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("gboost", model)
+        ])
 
         # TODO: Choose scoring metrics based on classification vs regression
         if self.task == "classification":
             scoring = ["accuracy", "precision", "recall", "f1", "roc_auc"]
+            if self.multi_class:
+                scoring = ["accuracy", "precision_weighted", "recall_weighted", "f1_weighted", "roc_auc_ovr_weighted"] 
         else:
             scoring = ["neg_mean_squared_error", "neg_mean_absolute_error", "r2"]
 
         results = {}
         # TODO: Get mean, stdev of cross_val_score for each metric
-        pass
+        for score in scoring:
+            scores = cross_val_score(pipe, X, y, cv=cv, scoring=score)
+            results[score] = {"mean": scores.mean(), "std": scores.std()}
+        return results
 
     def get_feature_importance(
         self, plot: bool = False, top_n: int = 20
@@ -198,7 +259,18 @@ class GradientBoostingModel:
         """
 
         # TODO: Optionally plot a bar chart of top_n feature importances
-        pass
+        important_features = pd.DataFrame({"Features": self.feature_names, "Importance": self.model.feature_importances_}).sort_values(by="Importance",ascending=False)
+        
+        if plot:
+            plt.bar(important_features["Features"][0:top_n], height=important_features["Importance"][0:top_n])
+            plt.xlabel("Features")
+            plt.ylabel("Importance")
+            plt.title("Feature Importances")
+            plt.xticks(rotation=45)
+
+
+        return important_features.head(top_n)
+        
 
     def tune_hyperparameters(
         self,
@@ -222,13 +294,25 @@ class GradientBoostingModel:
             Dictionary with best parameters and results
         """
         # TODO: Choose classifier or regressor based on task
-        model = None
+        if self.task == "classification":
+            model = self.model 
+        elif self.task == "regression":
+            model = self.model
+
+        if self.task == "classification":
+            scoring = ["accuracy", "precision", "recall", "f1", "roc_auc"]
+            if self.multi_class:
+                scoring = ["accuracy", "precision_weighted", "recall_weighted", "f1_weighted", "roc_auc_ovr_weighted"] 
+        else:
+            scoring = ["neg_mean_squared_error", "neg_mean_absolute_error", "r2"]
 
         # TODO: Initialize GridSearchCV
-        grid_search = None
+        grid_search = GridSearchCV(estimator=model, param_grid=param_grid, cv=cv, scoring=scoring, refit=False)
 
         # TODO: Perform grid search for hyperparameter tuning
-        pass
+        grid_search.fit(X, y)
+
+        return grid_search
 
     def plot_tree(
         self, tree_index: int = 0, figsize: Tuple[int, int] = (20, 15)
@@ -240,5 +324,11 @@ class GradientBoostingModel:
             tree_index: Index of the tree to plot
             figsize: Figure size for the plot
         """
+        from sklearn import tree as sklearn_tree
 
-        pass
+        plt.figure(figsize=figsize)
+        sklearn_tree.plot_tree(self.model.estimators_[tree_index][0], feature_names=self.feature_names, filled=True)
+        plt.title(f"Tree {tree_index} Diagram from Ensemble Model")
+        plt.show()
+        
+
